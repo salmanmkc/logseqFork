@@ -1,12 +1,12 @@
 (ns frontend.worker.rtc.ws-util
   "Add RTC related logic to the function based on ws."
   (:require [cljs-http-missionary.client :as http]
+            [frontend.worker-common.util :as worker-util]
             [frontend.worker.rtc.db :as rtc-db]
             [frontend.worker.rtc.exception :as r.ex]
             [frontend.worker.rtc.malli-schema :as rtc-schema]
             [frontend.worker.rtc.ws :as ws]
             [frontend.worker.state :as worker-state]
-            [frontend.worker.util :as worker-util]
             [goog.string :as gstring]
             [logseq.graph-parser.utf8 :as utf8]
             [missionary.core :as m]))
@@ -16,7 +16,8 @@
   (when (= :graph-not-exist (:type (:ex-data resp)))
     (rtc-db/remove-rtc-data-in-conn! (worker-state/get-current-repo))
     (worker-util/post-message :remote-graph-gone []))
-  (if-let [e ({:graph-not-exist r.ex/ex-remote-graph-not-exist
+  (if-let [e ({:ws-conn-already-disconnected r.ex/ex-ws-already-disconnected
+               :graph-not-exist r.ex/ex-remote-graph-not-exist
                :graph-not-ready r.ex/ex-remote-graph-not-ready
                :bad-request-body r.ex/ex-bad-request-body
                :not-allowed r.ex/ex-not-allowed}
@@ -65,7 +66,8 @@
 (defn get-ws-url
   [token]
   (assert (some? token))
-  (gstring/format @worker-state/*rtc-ws-url token))
+  (when-let [url @worker-state/*rtc-ws-url]
+    (gstring/format url token)))
 
 (defn- gen-get-ws-create-map
   "Return a map with atom *current-ws and a task

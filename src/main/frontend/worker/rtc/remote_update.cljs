@@ -4,6 +4,7 @@
             [clojure.set :as set]
             [clojure.string :as string]
             [datascript.core :as d]
+            [frontend.worker-common.util :as worker-util]
             [frontend.worker.handler.page :as worker-page]
             [frontend.worker.rtc.asset :as r.asset]
             [frontend.worker.rtc.client-op :as client-op]
@@ -11,7 +12,6 @@
             [frontend.worker.rtc.log-and-state :as rtc-log-and-state]
             [frontend.worker.rtc.malli-schema :as rtc-schema]
             [frontend.worker.state :as worker-state]
-            [frontend.worker.util :as worker-util]
             [lambdaisland.glogi :as log]
             [logseq.clj-fractional-indexing :as index]
             [logseq.common.defkeywords :refer [defkeywords]]
@@ -82,7 +82,10 @@ so need to pull earlier remote-data from websocket."})
                   nil sorted-order+block-uuid-coll)]
           (index/generate-key-between start-order end-order)
           block-order)]
-    (ldb/transact! conn [{:block/uuid block-uuid :block/order block-order*}])
+    (ldb/transact! conn [{:block/uuid block-uuid :block/order block-order*}]
+                   {:rtc-op? true
+                    :persist-op? false
+                    :gen-undo-ops? false})
     ;; TODO: add ops when block-order* != block-order
     ))
 
@@ -103,7 +106,12 @@ so need to pull earlier remote-data from websocket."})
     :transact-opts {:repo repo
                     :conn conn}}
    (let [opts' (assoc opts :keep-block-order? true)]
-     (outliner-core/insert-blocks! repo conn blocks target opts'))))
+     (outliner-core/insert-blocks! repo conn blocks target opts')))
+  (doseq [block blocks]
+    (assert (some? (d/entity @conn [:block/uuid (:block/uuid block)]))
+            {:msg "insert-block failed"
+             :block block
+             :target target})))
 
 (defmethod transact-db! :insert-no-order-blocks [_ conn block-uuid+parent-coll]
   (ldb/transact! conn
@@ -113,7 +121,8 @@ so need to pull earlier remote-data from websocket."})
                            block-parent (assoc :block/parent [:block/uuid block-parent])))
                        block-uuid+parent-coll)
                  {:persist-op? false
-                  :gen-undo-ops? false}))
+                  :gen-undo-ops? false
+                  :rtc-op? true}))
 
 (defmethod transact-db! :save-block [_ & args]
   (outliner-tx/transact!
@@ -128,11 +137,13 @@ so need to pull earlier remote-data from websocket."})
   (ldb/transact! conn
                  (mapv (fn [block-uuid] [:db/retractEntity [:block/uuid block-uuid]]) block-uuids)
                  {:persist-op? false
-                  :gen-undo-ops? false}))
+                  :gen-undo-ops? false
+                  :rtc-op? true}))
 
 (defmethod transact-db! :upsert-whiteboard-block [_ conn blocks]
   (ldb/transact! conn blocks {:persist-op? false
-                              :gen-undo-ops? false}))
+                              :gen-undo-ops? false
+                              :rtc-op? true}))
 
 (defn- group-remote-remove-ops-by-whiteboard-block
   "return {true [<whiteboard-block-ops>], false [<other-ops>]}"
@@ -174,22 +185,22 @@ so need to pull earlier remote-data from websocket."})
         (when-let [b (d/entity @conn [:block/uuid block-uuid])]
           (when-let [target-b
                      (d/entity @conn (:db/id (:block/page (d/entity @conn [:block/uuid block-uuid]))))]
-            (transact-db! :move-blocks&persist-op repo conn [b] target-b false))))
+            (transact-db! :move-blocks&persist-op repo conn [b] target-b {:sibling? false}))))
       (doseq [block-uuid block-uuids-to-remove]
         (when-let [b (d/entity @conn [:block/uuid block-uuid])]
           (transact-db! :delete-blocks repo conn date-formatter [b] {}))))))
 
 (defn- insert-or-move-block
   [repo conn block-uuid remote-parents remote-block-order move? op-value]
-  (when (seq remote-parents)
+  (when (or (seq remote-parents) remote-block-order) ;at least one of parent|order exists
     (let [first-remote-parent (first remote-parents)
-          local-parent (d/entity @conn [:block/uuid first-remote-parent])
+          local-parent (when first-remote-parent (d/entity @conn [:block/uuid first-remote-parent]))
           whiteboard-page-block? (ldb/whiteboard? local-parent)
           b (d/entity @conn [:block/uuid block-uuid])]
       (case [whiteboard-page-block? (some? local-parent) (some? remote-block-order)]
         [false true true]
         (do (if move?
-              (transact-db! :move-blocks repo conn [b] local-parent false)
+              (transact-db! :move-blocks repo conn [b] local-parent {:sibling? false})
               (transact-db! :insert-blocks repo conn
                             [{:block/uuid block-uuid
                               :block/title ""}]
@@ -198,16 +209,24 @@ so need to pull earlier remote-data from websocket."})
 
         [false true false]
         (if move?
-          (transact-db! :move-blocks repo conn [b] local-parent false)
+          (transact-db! :move-blocks repo conn [b] local-parent
+                        {:sibling? false})
           (transact-db! :insert-no-order-blocks conn [[block-uuid first-remote-parent]]))
+
+        [false false true] ;no parent, only update order. e.g. update property's order
+        (when (and (empty? remote-parents) move?)
+          (transact-db! :update-block-order-directly repo conn block-uuid nil remote-block-order))
 
         ([true false false] [true false true] [true true false] [true true true])
         (throw (ex-info "Not implemented yet for whiteboard" {:op-value op-value}))
 
-        (throw (ex-info "Don't know where to insert" {:block-uuid block-uuid
-                                                      :remote-parents remote-parents
-                                                      :remote-block-order remote-block-order
-                                                      :op-value op-value}))))))
+        (let [e (ex-info "Don't know where to insert" {:block-uuid block-uuid
+                                                       :remote-parents remote-parents
+                                                       :remote-block-order remote-block-order
+                                                       :move? move?
+                                                       :op-value op-value})]
+          (log/error :insert-or-move-block e)
+          (throw e))))))
 
 (defn- move-ops-map->sorted-move-ops
   [move-ops-map]
@@ -476,8 +495,8 @@ so need to pull earlier remote-data from websocket."})
 
 (defn- remote-op-value->schema-tx-data
   [block-uuid op-value]
-  (when-let [schema-map (some-> op-value :client/schema ldb/read-transit-str)]
-    (when-let [db-ident (:db/ident op-value)]
+  (when-let [db-ident (:db/ident op-value)]
+    (let [schema-map (some-> op-value :client/schema ldb/read-transit-str)]
       [(merge {:block/uuid block-uuid :db/ident db-ident} schema-map)])))
 
 (defn- update-block-order
@@ -494,15 +513,15 @@ so need to pull earlier remote-data from websocket."})
       (let [{update-block-order-tx-data :tx-data op-value :op-value} (update-block-order (:db/id ent) op-value)
             first-remote-parent (first parents)
             local-parent (d/entity @conn [:block/uuid first-remote-parent])
-            whiteboard-page-block? (ldb/whiteboard? local-parent)]
+            whiteboard-page-block? (ldb/whiteboard? local-parent)
+            tx-meta {:persist-op? false :gen-undo-ops? false :rtc-op? true}]
         (if whiteboard-page-block?
           (upsert-whiteboard-block repo conn op-value)
           (do (when-let [schema-tx-data (remote-op-value->schema-tx-data block-uuid op-value)]
-                (ldb/transact! conn schema-tx-data {:persist-op? false :gen-undo-ops? false}))
+                (ldb/transact! conn schema-tx-data tx-meta))
               (when-let [tx-data (seq (remote-op-value->tx-data @conn ent (dissoc op-value :client/schema)
                                                                 rtc-const/ignore-attrs-when-syncing))]
-                (ldb/transact! conn (concat tx-data update-block-order-tx-data)
-                               {:persist-op? false :gen-undo-ops? false}))))))))
+                (ldb/transact! conn (concat tx-data update-block-order-tx-data) tx-meta))))))))
 
 (defn- apply-remote-update-ops
   [repo conn update-ops]
@@ -541,6 +560,7 @@ so need to pull earlier remote-data from websocket."})
         ;; TODO: current page-create fn is buggy, even provide :uuid option, it will create-page with different uuid,
         ;; if there's already existing same name page
         (assert (= page-uuid self) {:page-name page-name :page-uuid page-uuid :should-be self})
+        (assert (some? (d/entity @conn [:block/uuid page-uuid])) {:page-uuid page-uuid :page-name page-name})
         (update-block-attrs repo conn self op-value)))))
 
 (defn- ensure-refed-blocks-exist
@@ -598,8 +618,7 @@ so need to pull earlier remote-data from websocket."})
           (js/console.groupCollapsed "rtc/apply-remote-ops-log")
           (batch-tx/with-batch-tx-mode conn {:rtc-tx? true
                                              :persist-op? false
-                                             :gen-undo-ops? false
-                                             :frontend.worker.pipeline/skip-store-conn rtc-const/RTC-E2E-TEST}
+                                             :gen-undo-ops? false}
             (worker-util/profile :ensure-refed-blocks-exist (ensure-refed-blocks-exist repo conn refed-blocks))
             (worker-util/profile :apply-remote-update-page-ops (apply-remote-update-page-ops repo conn update-page-ops))
             (worker-util/profile :apply-remote-move-ops (apply-remote-move-ops repo conn sorted-move-ops))
@@ -610,7 +629,8 @@ so need to pull earlier remote-data from websocket."})
           (worker-util/profile :apply-remote-remove-ops (apply-remote-remove-ops repo conn date-formatter remove-ops))
           ;; wait all remote-ops transacted into db,
           ;; then start to check any asset-updates in remote
-          (r.asset/emit-remote-asset-updates-from-block-ops db-before remove-ops)
+          (let [db-after @conn]
+            (r.asset/emit-remote-asset-updates-from-block-ops db-before db-after remove-ops update-ops))
           (js/console.groupEnd)
 
           (client-op/update-local-tx repo remote-t)

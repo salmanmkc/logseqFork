@@ -16,6 +16,7 @@
             [frontend.db.restore :as db-restore]
             [frontend.error :as error]
             [frontend.handler.command-palette :as command-palette]
+            [frontend.handler.db-based.vector-search-flows :as vector-search-flows]
             [frontend.handler.events :as events]
             [frontend.handler.events.ui]
             [frontend.handler.file-based.events]
@@ -148,7 +149,6 @@
   (render)
   (i18n/start)
   (instrument/init)
-  (state/set-online! js/navigator.onLine)
 
   (-> (util/indexeddb-check?)
       (p/catch (fn [_e]
@@ -160,6 +160,7 @@
   (events/run!)
 
   (p/do!
+   (prn :debug :start-db-worker)
    (-> (p/let [_ (db-browser/start-db-worker!)
                repos (repo-handler/get-repos)
                _ (state/set-repos! repos)
@@ -169,6 +170,7 @@
                    (repo-handler/new-db! config/demo-repo)
                    (restore-and-setup! repo))]
          (set-network-watcher!)
+
          (when (util/electron?)
            (persist-db/run-export-periodically!))
          (when (mobile-util/native-platform?)
@@ -176,11 +178,20 @@
        (p/catch (fn [e]
                   (js/console.error "Error while restoring repos: " e)))
        (p/finally (fn []
-                    (state/set-db-restoring! false))))
+                    (state/set-db-restoring! false)
+                    (p/resolve! state/app-ready-promise true)
+                    (when-not (util/mobile?)
+                      (p/let [webgpu-available? (db-browser/<check-webgpu-available?)]
+                        (log/info :webgpu-available? webgpu-available?)
+                        (when webgpu-available?
+                          (p/do! (db-browser/start-inference-worker!)
+                                 (db-browser/<connect-db-worker-and-infer-worker!)
+                                 (reset! vector-search-flows/*infer-worker-ready true))))))))
 
    (util/<app-wake-up-from-sleep-loop (atom false))
 
-   (persist-var/load-vars)))
+   (when-not (util/mobile?)
+     (persist-var/load-vars))))
 
 (defn stop! []
   (prn "stop!"))

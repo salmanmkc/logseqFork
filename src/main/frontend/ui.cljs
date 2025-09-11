@@ -295,7 +295,8 @@
               (icon "info-circle" {:class "text-indigo-500" :size "20"}))
             status)]
       [:div.ui__notifications-content
-       {:style
+       {:class (str "notification-" (name (or (when (keyword? status) status) :info)))
+        :style
         (when (or (= state "exiting")
                   (= state "exited"))
           {:z-index -1})}
@@ -810,15 +811,17 @@
       :on-pointer-up #(let [value (util/evalue %)]
                         (on-change value))}]))
 
-(rum/defcs tweet-embed < (rum/local true :loading?)
+(rum/defcs tweet-embed < rum/reactive
+  (rum/local true :loading?)
   [state id]
   (let [*loading? (:loading? state)]
-    [:div [(when @*loading? [:span.flex.items-center [svg/loading " ... loading"]])
-           (ReactTweetEmbed
-            {:id                    id
-             :class                 "contents"
-             :options               {:theme (when (= (state/sub :ui/theme) "dark") "dark")}
-             :on-tweet-load-success #(reset! *loading? false)})]]))
+    [:div
+     (when @*loading? [:span.flex.items-center [svg/loading " loading"]])
+     (ReactTweetEmbed
+      {:id                    id
+       :class                 "contents"
+       :options               {:theme (when (= (state/sub :ui/theme) "dark") "dark")}
+       :on-tweet-load-success #(reset! *loading? false)})]))
 
 (def icon shui.icon.v2/root)
 

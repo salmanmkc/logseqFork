@@ -73,10 +73,12 @@
 (rum/defc mobile-bar < rum/reactive
   []
   (when (and (util/mobile?)
+             (not (state/sub :editor/code-block-context))
              (or (state/sub :editor/editing?)
                  (= "app-keep-keyboard-open-input" (some-> js/document.activeElement (.-id)))))
     (let [commands' (commands)]
       [:div#mobile-editor-toolbar
+       {:on-click #(util/stop %)}
        [:div.toolbar-commands
         ;; (command (editor-handler/move-up-down true) {:icon "arrow-bar-to-up"})
         ;; (command (editor-handler/move-up-down false) {:icon "arrow-bar-to-down"})

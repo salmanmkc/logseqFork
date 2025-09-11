@@ -9,10 +9,6 @@
 
 (def ^:private *rtc-log (atom nil))
 
-(def rtc-log-flow
-  "used by rtc-e2e-test"
-  (m/watch *rtc-log))
-
 (def ^:private rtc-log-type-schema
   (vec
    (concat
@@ -24,6 +20,7 @@
        :rtc.log/download {:doc "rtc log type for upload-graph."}
        :rtc.log/cancelled {:doc "rtc has been cancelled"}
        :rtc.log/apply-remote-update {:doc "apply remote updates to local graph"}
+       :rtc.log/pull-remote-data {:doc "pull remote updates"}
        :rtc.log/push-local-update {:doc "push local updates to remote graph"}
        :rtc.log/higher-remote-schema-version-exists {:doc "remote-graph with larger schema-version exists"}
        :rtc.log/branch-graph {:doc "rtc log type for creating a new graph branch"}
@@ -101,7 +98,7 @@
         current-remote-t (get @*graph-uuid->remote-t graph-uuid)
         current-local-t (get @*graph-uuid->local-t graph-uuid)]
     (when (and current-remote-t current-local-t)
-      (assert (and (>= remote-t current-remote-t) (>= remote-t current-local-t))
+      (assert (and remote-t (>= remote-t current-remote-t) (>= remote-t current-local-t))
               {:remote-t remote-t
                :current-local-t current-local-t
                :current-remote-t current-remote-t}))
